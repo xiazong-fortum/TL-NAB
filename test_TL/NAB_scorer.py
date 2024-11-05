@@ -9,7 +9,7 @@ from collections import namedtuple
 AnomalyPoint = namedtuple("AnomalyPoint", ["timestamp", "anomaly_score", "sweep_score", "window_name"])
 
 class NABScorer:
-    def __init__(self, probation_percent=0.15, profiles: Dict = None):
+    def __init__(self, probation_percent=0.15, profiles: Dict = None, threshold=None):
         """
         Initialize NAB scorer
         
@@ -17,7 +17,7 @@ class NABScorer:
             profiles: Scoring configuration file, default is NAB's original three configurations
         """
         self.probation_percent = probation_percent
-        
+        self.threshold = threshold
         self.profiles = profiles or {
             "standard": {
                 "tpWeight": 1.0,
@@ -38,6 +38,10 @@ class NABScorer:
                 "tnWeight": 1.0
             }
         }
+        
+        self.windows = []
+        
+        
         
     def sigmoid(self, x):
         """Standard sigmoid function"""
@@ -125,7 +129,7 @@ class NABScorer:
                 windows.pop(i+1)
             else:
                 i += 1
-                
+
         return windows
 
     def score(self,
@@ -170,7 +174,7 @@ class NABScorer:
                 raise ValueError(f"{filename} is missing the anomaly_score column")
                 
             if filename not in label_dict:
-                continue
+                raise ValueError(f"{filename} is missing label data")
                 
             # Check validity of labels
             labels = label_dict[filename]
@@ -184,31 +188,32 @@ class NABScorer:
                 raw_labels=labels,
                 timestamps=timestamps
             )
-            # print('windows:',windows)
+            print('windows:',windows)
             
             # Check validity of windows
             if not windows:
                 raise ValueError(f"{filename} has no valid anomaly windows")
             
+                       
             # Calculate optimal threshold and normalized score
-            normalized_score, threshold = self.calc_score_by_threshold(
+            normalized_score, threshold, confusion_matrix = self.calc_score_by_threshold(
                 timestamps=timestamps,
                 anomaly_scores=df['anomaly_score'].values,
                 windows=windows,
                 profile=profile
             )
             
-            final_scores[filename] = normalized_score
+            final_scores[filename] = {'score':normalized_score, 'threshold':threshold, 'windows':windows, 'confusion_matrix':confusion_matrix}
+            print(f"Score for {filename}: {normalized_score:.2f} (threshold={threshold})")
                 
         return final_scores
-
 
     def calc_score_by_threshold(self, 
                                 timestamps, 
                                 anomaly_scores, 
                                 windows, 
                                 profile: str = "standard"):
-        """Calculate the optimal threshold and corresponding NAB score."""
+        """Calculate the NAB score using either a specified threshold or by optimizing."""
         # Prepare score data
         score_parts = {}
         
@@ -226,12 +231,9 @@ class NABScorer:
         
         # Sort scores by anomaly score in descending order
         sweep_scores.sort(key=lambda x: x.anomaly_score, reverse=True)
-        
-        # Store scores by threshold
         scores_by_threshold = []
-        cur_threshold = 1.1
+        cur_threshold = 1.0
         
-        # print("\nCalculating scores by threshold:")
         for point in sweep_scores:
             if point.anomaly_score != cur_threshold:
                 # Save the current threshold's score
@@ -239,13 +241,13 @@ class NABScorer:
                 scores_by_threshold.append({
                     'threshold': cur_threshold,
                     'score': cur_score,
-                    'tp': tp,
-                    'tn': tn,
-                    'fp': fp,
-                    'fn': fn
+                    'confusion_matrix': {
+                        'tp': tp,
+                        'tn': tn,
+                        'fp': fp,
+                        'fn': fn
+                    }
                 })
-                # print(f"Threshold {cur_threshold}: score={cur_score}, TP={tp}, TN={tn}, FP={fp}, FN={fn}")
-                # print(f"Score parts: {score_parts}")
                 cur_threshold = point.anomaly_score
                 
             # Update counts
@@ -266,9 +268,14 @@ class NABScorer:
                     score_parts.get(point.window_name, float('-inf')),
                     point.sweep_score * weights["tpWeight"]
                 )
-        
-        # Find the best threshold
-        best_score = max(scores_by_threshold, key=lambda x: x['score'])
+        if self.threshold is not None:
+            # Sort scores by threshold in descending order
+            scores_by_threshold.sort(key=lambda x: x['threshold'])
+            # Use the first score with threshold <= self.threshold
+            best_score = next(score for score in scores_by_threshold if score['threshold'] >= self.threshold)
+        else:
+            # Find the best threshold from optimization
+            best_score = max(scores_by_threshold, key=lambda x: x['score'])
         
         # Calculate the null score using the separate function
         null_score = self.calc_null_score(timestamps, windows, profile)
@@ -282,9 +289,11 @@ class NABScorer:
         else:
             normalized_score = 100 * (best_score['score'] - null_score) / (perfect_score - null_score)
         
-        return normalized_score, best_score['threshold']
+        print(f"Threshold = {best_score['threshold']}, normalized score = {normalized_score:.2f}, score={best_score['score']}, (TP={tp}, TN={tn}, FP={fp}, FN={fn})")
+        
+        return normalized_score, best_score['threshold'], best_score['confusion_matrix']
 
-    def _get_probation_length(self, num_rows):
+    def get_probation_length(self, num_rows):
         """Determine the length of the probation period based on the number of rows."""
         return min(
             math.floor(self.probation_percent * num_rows),
@@ -307,7 +316,7 @@ class NABScorer:
 
         # Configurable constants
         max_tp = self.scaled_sigmoid(-1.0)
-        probation_length = self._get_probation_length(len(timestamps))
+        probation_length = self.get_probation_length(len(timestamps))
 
         # Variables updated during iteration
         cur_window = None
@@ -424,9 +433,9 @@ class NABScorer:
         # Calculate the ideal score for each window
         perfect_score = len(windows) * max_tp_score * weights["tpWeight"]
         
-        # print(f"Perfect score calculation: windows={len(windows)}, max_tp={max_tp_score}, weight={weights['tpWeight']}")
+        # print(f"Perfect score calculation: no. of windows={len(windows)}, max_tp={max_tp_score}, weight={weights['tpWeight']}")
         
-        return max(perfect_score, 1.0)  # Ensure score is not zero
+        return perfect_score  # Ensure score is not zero
 
 
 ######################## Example data generation ##############################
@@ -451,25 +460,29 @@ class NABScorer:
 # }
 # print(label_dict)
 
-import os
-print(os.getcwd())
-data1 = pd.read_csv('./test_TL/data1.csv')
-label_dict = json.load(open('./test_TL/label.json'))
 
-data_dict = {
-    "data1.csv": data1
-}
+def main():
+    # Load data
+    data1 = pd.read_csv('./test_TL/results/inter_leakage_lstm_TL_u1.csv')
+    # data2 = pd.read_csv('./test_TL/results/pump_failure_lstm_TL_u1.csv')
 
-# Initialize scorer
-scorer = NABScorer()
+    label_dict = json.load(open('./test_TL/shf_labels.json'))
 
-# Calculate scores
-scores = scorer.score(data_dict, label_dict, profile="standard")
-print('Final scores', scores)
-scores = scorer.score(data_dict, label_dict, profile="reward_low_FP_rate")
-print('Final scores', scores)
-scores = scorer.score(data_dict, label_dict, profile="reward_low_FN_rate")
-print('Final scores', scores)
+    data_dict = {
+        "pump_failure.csv": data1,
+        # "inter_leakage.csv": data2,
+    }
 
+    # Initialize scorer
+    scorer = NABScorer(threshold=0.8)
 
+    profiles = ["standard"]
+    scores = []
 
+    # Calculate scores
+    for p in profiles:
+        scores.append(scorer.score(data_dict, label_dict, profile=p))
+    print('Final scores', scores)
+
+if __name__ == "__main__":
+    main()
