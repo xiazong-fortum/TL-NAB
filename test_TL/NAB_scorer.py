@@ -168,8 +168,6 @@ class NABScorer:
             
         for filename, df in data_dict.items():
             # Check for required columns
-            if 'timestamp' not in df.columns:
-                raise ValueError(f"{filename} is missing the timestamp column")
             if 'anomaly_score' not in df.columns:
                 raise ValueError(f"{filename} is missing the anomaly_score column")
                 
@@ -181,7 +179,7 @@ class NABScorer:
             if not labels:
                 raise ValueError(f"{filename} has no label data")
                 
-            timestamps = pd.to_datetime(df['timestamp'])
+            timestamps = pd.to_datetime(df.index)
             
             # Convert windows
             windows = self.convert_windows(
