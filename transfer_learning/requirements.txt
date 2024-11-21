@@ -4,5 +4,6 @@ matplotlib
 seaborn
 scipy
 scikit-learn
+dash
 torch
 jupyter

@@ -43,9 +43,24 @@ class SimpleLSTMAutoencoder(nn.Module):
         # Fully connected layer to map hidden state to the output dimension
         self.fc = nn.Linear(hidden_dim, input_dim)
         
+        # Sparse data may be limited by the behavior of ReLU (e.g. neurons with zero output do not update weights), 
+        # LeakyReLU: allows small negative gradients to flow, alleviating the problems caused by sparsity.
+        self.relu = nn.LeakyReLU(negative_slope=0.01)
+        
         # Store sequence length for generating sequence in decoder
         self.sequence_length = sequence_length
-
+        
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        for name, param in self.named_parameters():
+            if 'weight_ih' in name:
+                nn.init.xavier_uniform_(param.data)
+            elif 'weight_hh' in name: 
+                nn.init.orthogonal_(param.data)
+            elif 'bias' in name:
+                nn.init.constant_(param.data, 0)  # Initialize biases to 0
+                
     def forward(self, x):
         # Encoder
         _, (hidden, cell) = self.encoder(x)
@@ -59,7 +74,7 @@ class SimpleLSTMAutoencoder(nn.Module):
         # Decode step-by-step
         for _ in range(self.sequence_length):
             decoder_output, (hidden, cell) = self.decoder(decoder_input, (hidden, cell))
-            output = self.fc(decoder_output)  # Map to input dimension
+            output = self.relu(self.fc(decoder_output))   # Map to input dimension
             outputs.append(output)
             decoder_input = output  # Set the next input to be the current output
         

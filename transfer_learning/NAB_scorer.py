@@ -8,8 +8,13 @@ from collections import namedtuple
 
 AnomalyPoint = namedtuple("AnomalyPoint", ["timestamp", "anomaly_score", "sweep_score", "window_name"])
 
+ThresholdScore = namedtuple(
+  "ThresholdScore",
+  ["score", "threshold", "tp", "tn", "fp", "fn", "total"]
+)
+
 class NABScorer:
-    def __init__(self, probation_percent=0.15, profiles: Dict = None, threshold=None):
+    def __init__(self, probation_percent=0.1, profiles: Dict = None, threshold=None):
         """
         Initialize NAB scorer
         
@@ -21,21 +26,21 @@ class NABScorer:
         self.profiles = profiles or {
             "standard": {
                 "tpWeight": 1.0,
-                "fnWeight": 1.0, 
-                "fpWeight": 0.11,
-                "tnWeight": 1.0
+                "fnWeight": -0.5,
+                "fpWeight": -0.5, 
+                "tnWeight": 0.1
             },
             "reward_low_FP_rate": {
                 "tpWeight": 1.0,
-                "fnWeight": 1.0,
-                "fpWeight": 0.22, 
-                "tnWeight": 1.0
+                "fnWeight": -0.5,
+                "fpWeight": -1.0, 
+                "tnWeight": 0.1
             },
             "reward_low_FN_rate": {
                 "tpWeight": 1.0,
-                "fnWeight": 2.0,
-                "fpWeight": 0.11,
-                "tnWeight": 1.0
+                "fnWeight": -1.0,
+                "fpWeight": -0.5, 
+                "tnWeight": 0.1
             }
         }
         
@@ -167,7 +172,8 @@ class NABScorer:
             raise ValueError("Data dictionary cannot be empty")
         if not label_dict:
             raise ValueError("Label dictionary cannot be empty")
-            
+        
+        original_threshold = self.threshold
         for filename, df in data_dict.items():
             # Check for required columns
             if 'anomaly_score' not in df.columns:
@@ -199,110 +205,133 @@ class NABScorer:
             
                        
             # Calculate optimal threshold and normalized score
-            normalized_score, threshold, confusion_matrix = self.calc_score_by_threshold(
+            best_score, normalized_score = self.calc_score_by_threshold(
                 timestamps=timestamps,
                 anomaly_scores=df['anomaly_score'].values,
                 windows=windows,
                 profile=profile
             )
             
-            final_scores[filename] = {'score':normalized_score, 'threshold':threshold, 'windows':windows, 'confusion_matrix':confusion_matrix}
-            print(f"Score for {filename}: {normalized_score:.2f} (threshold={threshold})")
-                
+            # # Calculate the null score using the separate function
+            # min_score = self.calc_min_score(timestamps, windows, profile)
+            
+            # # Calculate the perfect detector score
+            # max_score = self.get_max_score(windows, profile)
+                   
+            
+            final_scores[filename] = {'score':normalized_score, 'threshold':best_score.threshold, 'windows':windows, 
+                                      'confusion_matrix': {'tp': best_score.tp, 'tn': best_score.tn, 'fp': best_score.fp, 'fn': best_score.fn}}
+            self.threshold = original_threshold
+            
         return final_scores
 
     def calc_score_by_threshold(self, 
                                 timestamps, 
                                 anomaly_scores, 
-                                windows, 
+                                windows,
                                 profile: str = "standard"):
         """Calculate the NAB score using either a specified threshold or by optimizing."""
-        # Prepare score data
-        score_parts = {}
-        
-        # Get profile weights
-        weights = self.profiles[profile]
-        
-        # Calculate sweep scores for each point
-        sweep_scores = self.calc_sweep_score(timestamps, anomaly_scores, windows, profile)
-        
-        # Initialize counts
-        tn = sum(1 if x.window_name is None else 0 for x in sweep_scores)
-        fn = sum(1 if x.window_name is not None else 0 for x in sweep_scores)
-        tp = 0
-        fp = 0
-        
-        # Sort scores by anomaly score in descending order
-        sweep_scores.sort(key=lambda x: x.anomaly_score, reverse=True)
-        scores_by_threshold = []
-        
+
+
         if self.threshold == 'auto_cal':
             mean = np.mean(anomaly_scores)
             std_dev = np.std(anomaly_scores)
-            self.threshold = mean + std_dev
+            factor =  std_dev /(1 - mean)
             print('mean:',mean,'std_dev:',std_dev)
-
-        cur_threshold = 1.0
-        
-        for point in sweep_scores:
-            if point.anomaly_score != cur_threshold:
-                # Save the current threshold's score
-                cur_score = sum(score_parts.values())
-                scores_by_threshold.append({
-                    'threshold': cur_threshold,
-                    'score': cur_score,
-                    'confusion_matrix': {
-                        'tp': tp,
-                        'tn': tn,
-                        'fp': fp,
-                        'fn': fn
-                    }
-                })
-                cur_threshold = point.anomaly_score
-                
-            # Update counts
-            if point.window_name is not None:
-                tp += 1
-                fn -= 1
-            else:
-                fp += 1
-                tn -= 1
-                
-            # Update score parts
-            if point.window_name is None:
-                # False Positive score
-                score_parts["fp"] = score_parts.get("fp", 0) + point.sweep_score * weights["fpWeight"]
-            else:
-                # True Positive score - only take the highest score per window
-                score_parts[point.window_name] = max(
-                    score_parts.get(point.window_name, float('-inf')),
-                    point.sweep_score * weights["tpWeight"]
-                )
-                
+            thresholds = [mean + std_dev * factor]
         if self.threshold is not None:
-            # Sort scores by threshold in descending order
-            scores_by_threshold.sort(key=lambda x: x['threshold'])
-            # Use the first score with threshold <= self.threshold
-            best_score = next(score for score in scores_by_threshold if score['threshold'] >= float(self.threshold))
+            thresholds = [self.threshold]
+            # # Sort scores by threshold in descending order
+            # scores_by_threshold.sort(key=lambda x: x['threshold'])
+            # # Use the first score with threshold <= self.threshold
+            # best_score = next(score for score in scores_by_threshold if score['threshold'] >= float(self.threshold))
         else:
-            # Find the best threshold from optimization
-            best_score = max(scores_by_threshold, key=lambda x: x['score'])
+            # Find the best threshold from optimization            
+            thresholds = np.linspace(0.5, 1.0, 100)
+
+
+        weights = self.profiles[profile]
         
-        # Calculate the null score using the separate function
-        null_score = self.calc_null_score(timestamps, windows, profile)
+        # Calculate sweep scores for each point
+        anomalyList = self.calc_sweep_score(timestamps, anomaly_scores, windows, profile)
+        scorableList = sorted(
+            [x for x in anomalyList if x.window_name != 'probationary'],
+            key=lambda x: x.timestamp, reverse=False)
+       
+
+        scores_by_threshold = []
+        for threshold in thresholds:
+            # Initialize counts:
+            # every point outside a window is a true negative
+            # every point in a window is a false negative
+            tn = sum(1 if x.window_name is None else 0 for x in scorableList)
+            fn = sum(1 if x.window_name is not None else 0 for x in scorableList)
+            tp = 0
+            fp = 0
+            
+            tp_scores = {}
+            fp_scores = []
+            for row in scorableList:
+                if row.window_name not in ('probationary', None):
+                    tp_scores[row.window_name] = -weights['fnWeight']
+
+
+            # Iterate through every data point, the point is either:
+            #   * a true positive (has a `windowName`)
+            #   * a false positive (`windowName is None`).
+            for point in scorableList:
+                if point.anomaly_score >= threshold:
+                    # Update counts, if point is inside a window
+                    if point.window_name is not None:
+                        tp += 1
+                        fn -= 1
+                    else:
+                        fp += 1
+                        tn -= 1
+                        
+                    # Update score parts
+                    if point.window_name is None:
+                        # False Positive score
+                        fp_scores.append(point.sweep_score)
+                    else:
+                        # True Positive score - only take the highest score per window
+                        tp_scores[point.window_name] = max(
+                            tp_scores.get(point.window_name, float('-inf')),
+                            point.sweep_score
+                        )
+            
+            totalCount = max(tn + fn + len(tp_scores) + len(fp_scores), 1)
+            fp_mean = np.mean(fp_scores) if fp_scores else 0
+            tp_mean = np.mean(list(tp_scores.values())) if tp_scores else 0
+            tn_ratio = tn / totalCount
+            fn_ratio = fn / totalCount
+            
+            totalScore = (-1.0 * fp_mean * weights["fpWeight"] + 
+                        tp_mean * weights["tpWeight"] + 
+                        tn_ratio * weights["tnWeight"] + 
+                        fn_ratio * weights["fnWeight"])
+            
+            s = ThresholdScore(totalScore, threshold, tp, tn, fp, fn, totalCount)
+            scores_by_threshold.append(s)
+
+        # Find the best score based on the threshold (save the ThresholdScore object)
+        best_score = max(scores_by_threshold, key=lambda x: x.score)
+        self.threshold = best_score.threshold
         
-        # Calculate the perfect detector score
-        perfect_score = self.get_perfect_score(windows, profile)
         
-        # Ensure the denominator is not zero
-        if perfect_score == null_score:
-            normalized_score = 0
-        else:
-            normalized_score = 100 * (best_score['score'] - null_score) / (perfect_score - null_score)
+        min_score = weights["fpWeight"] * 1.0 + weights["fnWeight"] * 1.0
+        max_score = weights["tpWeight"] * 1.0 + weights["tnWeight"] * 1.0
         
-        print(f"Threshold = {best_score['threshold']}, normalized score = {normalized_score:.2f}, score={best_score['score']}, (TP={tp}, TN={tn}, FP={fp}, FN={fn})")
+        normalized_score = (best_score.score - min_score) / (max_score - min_score)
+        normalized_score = np.clip(normalized_score, 0, 1)*100
         
-        return normalized_score, best_score['threshold'], best_score['confusion_matrix']
+        print(f"""Normalized Score: {normalized_score:.2f}, 
+            score={best_score.score}, 
+            threshold={best_score.threshold}, 
+            TP={best_score.tp}, TN={best_score.tn}, FP={best_score.fp}, FN={best_score.fn}\n""")
+        
+
+        return best_score, normalized_score
 
     def get_probation_length(self, num_rows):
         """Determine the length of the probation period based on the number of rows."""
@@ -357,8 +386,8 @@ class NABScorer:
                 # if not window_credited and score > 0:
                 position_in_window = -(cur_window_right_idx - i + 1) / cur_window_width
                 unweighted_score = self.scaled_sigmoid(position_in_window)
-                # weighted_score = unweighted_score * weights["tpWeight"] / max_tp
-                weighted_score = unweighted_score * weights["tpWeight"]
+                weighted_score = unweighted_score / max_tp
+                # weighted_score = unweighted_score * weights["tpWeight"]
                     # window_credited = True  # Mark this window as credited with a TP
                 # else:
                     # weighted_score = 0.0  # Subsequent detections within the same window are not credited as TPs
@@ -372,7 +401,7 @@ class NABScorer:
                     position_past_window = abs(prev_window_right_idx - i) / float(prev_window_width - 1)
                     unweighted_score = self.scaled_sigmoid(position_past_window)
 
-                weighted_score = unweighted_score * weights["fpWeight"]
+                weighted_score = unweighted_score
 
             # Assign window name based on probation period
             if i >= probation_length:
@@ -394,7 +423,7 @@ class NABScorer:
 
         return anomaly_list
 
-    def calc_null_score(self, timestamps, windows, profile: str = "standard"):
+    def calc_min_score(self, timestamps, windows, profile: str = "standard"):
         """
         Calculate the baseline score of a null detector that outputs a constant anomaly score of 0.5.
         
@@ -414,7 +443,7 @@ class NABScorer:
         
         # Calculate sweep scores for the constant anomaly score
         null_sweep_scores = self.calc_sweep_score(timestamps, constant_scores, windows, profile)
-        
+
         # Calculate the null score
         null_score_parts = {}
         for point in null_sweep_scores:
@@ -424,14 +453,14 @@ class NABScorer:
             else:
                 # True Positive score - only take the highest score per window
                 null_score_parts[point.window_name] = max(
-                    null_score_parts.get(point.window_name, float('-inf')),
-                    point.sweep_score * weights["tpWeight"]
+                    null_score_parts.get(point.window_name, -weights["fnWeight"]),
+                    point.sweep_score
                 )
-        null_score = sum(null_score_parts.values())
-        
+        null_score = sum(null_score_parts.values())        
+
         return null_score
 
-    def get_perfect_score(self, windows, profile="standard"):
+    def get_max_score(self, windows, profile="standard"):
         """Calculate the score of a perfect detector"""
         weights = self.profiles[profile]
         
@@ -442,11 +471,11 @@ class NABScorer:
         max_tp_score = self.scaled_sigmoid(-1.0)  # Highest score at the start of the window
         
         # Calculate the ideal score for each window
-        perfect_score = len(windows) * max_tp_score * weights["tpWeight"]
+        max_score = len(windows) * max_tp_score * weights["tpWeight"]
         
         # print(f"Perfect score calculation: no. of windows={len(windows)}, max_tp={max_tp_score}, weight={weights['tpWeight']}")
         
-        return perfect_score  # Ensure score is not zero
+        return max_score  # Ensure score is not zero
 
 
 ######################## Example data generation ##############################
@@ -470,7 +499,7 @@ class NABScorer:
 #     "data1.csv": [str(dates[idx]) for idx in anomaly_indices]
 # }
 # print(label_dict)
-import json
+
 
 
 def main():
@@ -499,16 +528,19 @@ def main():
     os.chdir('/mnt/data/TL-NAB/transfer_learning')
     label_dict = json.load(open('./data/labels_window.json'))
 
-    inter_leakage = pd.read_csv('./results/inter_leakage_lstm_small_scored.csv', index_col='timestamp')
-    pump_failure = pd.read_csv('./results/pump_failure_lstm_small_scored.csv', index_col='timestamp')
+    inter_leakage = pd.read_csv('./results/inter_leakage_lstm_TL_u1_scored.csv', index_col='timestamp')
+    pump_failure = pd.read_csv('./results/pump_failure_lstm_TL_u1_scored.csv', index_col='timestamp')
 
     data_dict = {
         "pump_failure.csv": pump_failure,
         "inter_leakage.csv": inter_leakage,
     }
 
-    scorer = NABScorer(threshold='auto_cal')
-    score = scorer.score(data_dict, label_dict, label_windowed=True, profile='reward_low_FN_rate')
+    scorer = NABScorer(threshold=0.8, probation_percent=0.1)
+    # score = scorer.score(data_dict, label_dict, label_windowed=True, profile='standard')
+    # print(score['pump_failure.csv']['score'], score['inter_leakage.csv']['score'])
+    
+    score = scorer.score(data_dict, label_dict, label_windowed=True, profile='reward_low_FP_rate')
     print(score['pump_failure.csv']['score'], score['inter_leakage.csv']['score'])
 
 if __name__ == "__main__":
