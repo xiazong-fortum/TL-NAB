@@ -28,19 +28,19 @@ class NABScorer:
                 "tpWeight": 1.0,
                 "fnWeight": -0.5,
                 "fpWeight": -0.5, 
-                "tnWeight": 0.1
+                "tnWeight": 0
             },
             "reward_low_FP_rate": {
                 "tpWeight": 1.0,
                 "fnWeight": -0.5,
                 "fpWeight": -1.0, 
-                "tnWeight": 0.1
+                "tnWeight": 0
             },
             "reward_low_FN_rate": {
                 "tpWeight": 1.0,
                 "fnWeight": -1.0,
                 "fpWeight": -0.5, 
-                "tnWeight": 0.1
+                "tnWeight": 0
             }
         }
         
@@ -247,7 +247,7 @@ class NABScorer:
             # best_score = next(score for score in scores_by_threshold if score['threshold'] >= float(self.threshold))
         else:
             # Find the best threshold from optimization            
-            thresholds = np.linspace(0.5, 1.0, 100)
+            thresholds = np.linspace(0.1, 1.0, 100)
 
 
         weights = self.profiles[profile]

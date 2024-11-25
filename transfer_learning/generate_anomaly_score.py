@@ -99,7 +99,7 @@ def process_and_save_anomaly_scores(data_files, model_files, root_dir, scaler, s
             orginal_df['anomaly_score'] = anomaly_scores
             
             # Save the DataFrame with anomaly scores as a new CSV file
-            output_file = os.path.join('./results', file.replace('.csv', f'_{model_name}_scored.csv'))
+            output_file = os.path.join('./results', model_name, file.replace('.csv', f'_{model_name}_scored.csv'))
             orginal_df.to_csv(output_file, index=True)  # Preserve index (timestamps) in output file
             print(f"Anomaly scores saved to {output_file}")
     return orginal_df
@@ -111,9 +111,9 @@ def main():
 
     # File paths relative to root directory
     model_files = ['/model/lstm_small.pth']  # Add more model files as needed
-    data_files = ['/data/inter_leakage.csv', '/data/pump_failure.csv']
-    # scaler = StandardScaler()
-    
+    data_files = ['/data/test/inter_leakage.csv', '/data/test/pump_failure.csv']
+    scaler = StandardScaler()
+    sequence_length = 15
     # Run the anomaly detection and save results
     process_and_save_anomaly_scores(data_files, model_files, root_dir, scaler, sequence_length)
 

@@ -30,21 +30,23 @@ import torch.nn as nn
         
 #         return decoded
     
+import torch
+import torch.nn as nn
+
 class SimpleLSTMAutoencoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, sequence_length, num_layers):
+    def __init__(self, input_dim, hidden_dim, sequence_length, num_layers, dropout=0):
         super(SimpleLSTMAutoencoder, self).__init__()
         
-        # Encoder: a single LSTM layer
-        self.encoder = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
+        # Encoder: a single LSTM layer with dropout
+        self.encoder = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout)
         
-        # Decoder: a single LSTM layer
-        self.decoder = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
+        # Decoder: a single LSTM layer with dropout
+        self.decoder = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout)
         
         # Fully connected layer to map hidden state to the output dimension
         self.fc = nn.Linear(hidden_dim, input_dim)
         
-        # Sparse data may be limited by the behavior of ReLU (e.g. neurons with zero output do not update weights), 
-        # LeakyReLU: allows small negative gradients to flow, alleviating the problems caused by sparsity.
+        # LeakyReLU: allows small negative gradients to flow, alleviating problems caused by sparsity
         self.relu = nn.LeakyReLU(negative_slope=0.01)
         
         # Store sequence length for generating sequence in decoder
@@ -81,7 +83,7 @@ class SimpleLSTMAutoencoder(nn.Module):
         # Concatenate outputs along the sequence dimension
         outputs = torch.cat(outputs, dim=1)  # Shape: (batch_size, sequence_length, input_dim)
         return outputs
-    
+
     
 class WeightedLSTMAutoencoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, sequence_length):
